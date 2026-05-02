@@ -10,15 +10,20 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
 
     steps:
-      - name: Sync latest code to server directory
+      - name: Checkout latest code
+        uses: actions/checkout@v4
+
+      - name: Sync code to server directory
         run: |
-          echo "Start syncing code in /home/bl/SentryCut"
+          echo "Start syncing code to /home/bl/SentryCut"
 
-          cd /home/bl/SentryCut
-
-          git fetch origin main
-          git reset --hard origin/main
+          rsync -av --delete \
+            --exclude ".git" \
+            --exclude ".env" \
+            --exclude "logs" \
+            --exclude "data" \
+            --exclude "uploads" \
+            ./ /home/bl/SentryCut/
 
           echo "Code synced successfully"
-          git log -1 --oneline
-          ls -la
+          ls -la /home/bl/SentryCut
