@@ -1,0 +1,24 @@
+name: GitHub CI
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  sync-code:
+    runs-on: [self-hosted, Linux, X64]
+
+    steps:
+      - name: Sync latest code to server directory
+        run: |
+          echo "Start syncing code in /home/bl/SentryCut"
+
+          cd /home/bl/SentryCut
+
+          git fetch origin main
+          git reset --hard origin/main
+
+          echo "Code synced successfully"
+          git log -1 --oneline
+          ls -la
