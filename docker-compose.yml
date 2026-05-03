@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: Dockerfile.api
       args:
-        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-docker.m.daocloud.io/library/python:3.11-slim}
     image: sentrycut-api:latest
     container_name: sentrycut-api
     restart: unless-stopped
@@ -49,8 +49,8 @@ services:
       context: .
       dockerfile: Dockerfile.web
       args:
-        NODE_IMAGE: ${NODE_IMAGE:-node:20-alpine}
-        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.27-alpine}
+        NODE_IMAGE: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:20-alpine}
+        NGINX_IMAGE: ${NGINX_IMAGE:-docker.m.daocloud.io/library/nginx:1.27-alpine}
     image: sentrycut-web:latest
     container_name: sentrycut-web
     restart: unless-stopped

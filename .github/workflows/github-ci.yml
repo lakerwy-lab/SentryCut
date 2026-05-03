@@ -80,9 +80,9 @@ jobs:
             printf 'CORS_ALLOW_ORIGINS=%s\n' "${CORS_ALLOW_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}"
             printf 'API_PORT=%s\n' "${API_PORT:-8000}"
             printf 'WEB_PORT=%s\n' "${WEB_PORT:-5173}"
-            printf 'PYTHON_IMAGE=%s\n' "${PYTHON_IMAGE:-python:3.11-slim}"
-            printf 'NODE_IMAGE=%s\n' "${NODE_IMAGE:-node:20-alpine}"
-            printf 'NGINX_IMAGE=%s\n' "${NGINX_IMAGE:-nginx:1.27-alpine}"
+            printf 'PYTHON_IMAGE=%s\n' "${PYTHON_IMAGE:-docker.m.daocloud.io/library/python:3.11-slim}"
+            printf 'NODE_IMAGE=%s\n' "${NODE_IMAGE:-docker.m.daocloud.io/library/node:20-alpine}"
+            printf 'NGINX_IMAGE=%s\n' "${NGINX_IMAGE:-docker.m.daocloud.io/library/nginx:1.27-alpine}"
           } > .env
 
           chmod 600 .env
