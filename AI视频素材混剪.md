@@ -131,6 +131,20 @@ edge-tts
 10. 不做复杂后台管理系统
 ```
 
+### 3.3 关键工程修订
+
+本方案不收缩 MVP 范围，第一版仍然完整包含素材上传、素材库、索引、分镜、匹配、TTS、字幕、合成、预览下载。为了让实现更稳定，需要提前明确以下工程边界：
+
+```text
+1. /api/videos/render 是一键生成接口，负责统一编排 plan、match、tts、subtitle、render。
+2. 索引任务和渲染任务统一使用 tasks 表和 /api/tasks/{task_id} 查询状态。
+3. SentrySearch 后端通过 Python import 集成，不通过 CLI 调用。
+4. 默认 embedding 后端使用已测通的 Gemini，ChromaDB 路径固定为 ai-video-mixer-api/data/chroma/，避免 CLI 默认目录和后端目录不一致。
+5. LLM 返回的 estimated_duration 只作为估算值，最终时间线以每段 TTS 实际音频时长为准。
+6. FFmpeg 不直接用 -c copy 拼接不同来源素材，所有片段先统一转码再拼接。
+7. LLM 输出必须经过 JSON 解析和 Pydantic 校验，失败时重试 1 次，仍失败则任务 failed。
+```
+
 ---
 
 ## 4. 系统架构
@@ -401,10 +415,25 @@ file: 视频文件
 ```json
 {
   "material_id": "mat_001",
-  "filename": "office.mp4",
-  "path": "materials/office.mp4",
+  "original_filename": "office.mp4",
+  "stored_filename": "mat_001.mp4",
+  "path": "materials/mat_001.mp4",
+  "duration": 30.2,
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
   "status": "uploaded"
 }
+```
+
+上传策略：
+
+```text
+1. 第一版支持 mp4 / mov。
+2. 后端保存文件名使用 material_id + 原扩展名，原始文件名单独入库。
+3. 上传后用 ffprobe 读取 duration / width / height / fps。
+4. 同名文件不会覆盖。
+5. 不支持的格式直接返回明确错误。
 ```
 
 ---
@@ -422,8 +451,13 @@ GET /api/materials
   "items": [
     {
       "id": "mat_001",
-      "filename": "office.mp4",
-      "path": "materials/office.mp4",
+      "original_filename": "office.mp4",
+      "stored_filename": "mat_001.mp4",
+      "path": "materials/mat_001.mp4",
+      "duration": 30.2,
+      "width": 1920,
+      "height": 1080,
+      "fps": 30,
       "status": "uploaded",
       "created_at": "2026-05-02 12:00:00"
     }
@@ -452,7 +486,8 @@ POST /api/materials/index
 ```json
 {
   "task_id": "index_001",
-  "status": "running"
+  "type": "index",
+  "status": "pending"
 }
 ```
 
@@ -460,11 +495,14 @@ POST /api/materials/index
 
 ```text
 1. 读取素材文件
-2. 调用 SentrySearch 建索引
-3. 切片
-4. 生成 embedding
-5. 写入 ChromaDB
-6. 更新素材状态为 indexed
+2. 创建 type=index 的任务记录
+3. 通过 Python import 调用 SentrySearch 建索引
+4. 切片
+5. 生成 embedding
+6. 写入 ai-video-mixer-api/data/chroma/
+7. 记录 embedding_backend 和 embedding_model
+8. 更新素材状态为 indexed
+9. 更新任务状态为 completed
 ```
 
 ---
@@ -494,7 +532,7 @@ POST /api/scripts/plan
       "index": 1,
       "narration": "现在很多企业都在做 AI Agent",
       "visual_query": "科技感办公室，AI大屏，团队讨论",
-      "duration": 3.5
+      "estimated_duration": 3.5
     }
   ]
 }
@@ -517,7 +555,7 @@ POST /api/videos/match-clips
       "index": 1,
       "narration": "现在很多企业都在做 AI Agent",
       "visual_query": "科技感办公室，AI大屏，团队讨论",
-      "duration": 3.5
+      "estimated_duration": 3.5
     }
   ]
 }
@@ -532,8 +570,12 @@ POST /api/videos/match-clips
       "index": 1,
       "narration": "现在很多企业都在做 AI Agent",
       "visual_query": "科技感办公室，AI大屏，团队讨论",
-      "matched_clip": "clips/clip_001.mp4",
-      "duration": 3.5
+      "estimated_duration": 3.5,
+      "source_file": "materials/mat_001.mp4",
+      "source_start_time": 12.0,
+      "source_end_time": 42.0,
+      "similarity_score": 0.72,
+      "matched_clip": "clips/clip_001.mp4"
     }
   ]
 }
@@ -547,22 +589,46 @@ POST /api/videos/match-clips
 POST /api/videos/render
 ```
 
+接口职责：
+
+```text
+1. /api/videos/render 是一键生成接口。
+2. 当 segments 为空或不传时，后端自动执行：plan → match → tts → subtitle → render。
+3. 当 segments 不为空时，后端使用前端传入的分镜和素材匹配结果直接渲染。
+4. 这样既支持一键生成，也支持用户调整分镜或替换片段后重新生成。
+```
+
 请求：
 
 ```json
 {
   "script": "现在很多企业都在做 AI Agent...",
+  "voice": "zh-CN-XiaoxiaoNeural",
+  "aspect_ratio": "9:16",
   "segments": [
     {
       "index": 1,
       "narration": "现在很多企业都在做 AI Agent",
       "visual_query": "科技感办公室，AI大屏，团队讨论",
-      "matched_clip": "clips/clip_001.mp4",
-      "duration": 3.5
+      "estimated_duration": 3.5,
+      "source_file": "materials/mat_001.mp4",
+      "source_start_time": 12.0,
+      "source_end_time": 42.0,
+      "similarity_score": 0.72,
+      "matched_clip": "clips/clip_001.mp4"
     }
-  ],
+  ]
+}
+```
+
+如果用户直接一键生成，也可以传空分镜：
+
+```json
+{
+  "script": "现在很多企业都在做 AI Agent...",
   "voice": "zh-CN-XiaoxiaoNeural",
-  "aspect_ratio": "9:16"
+  "aspect_ratio": "9:16",
+  "segments": []
 }
 ```
 
@@ -571,7 +637,8 @@ POST /api/videos/render
 ```json
 {
   "task_id": "render_001",
-  "status": "running"
+  "type": "render",
+  "status": "pending"
 }
 ```
 
@@ -588,6 +655,7 @@ GET /api/tasks/{task_id}
 ```json
 {
   "task_id": "render_001",
+  "type": "render",
   "status": "rendering",
   "progress": 70,
   "current_step": "正在合成视频",
@@ -601,6 +669,7 @@ GET /api/tasks/{task_id}
 ```json
 {
   "task_id": "render_001",
+  "type": "render",
   "status": "completed",
   "progress": 100,
   "current_step": "生成完成",
@@ -608,6 +677,21 @@ GET /api/tasks/{task_id}
   "subtitle_url": "/static/output/subtitles/final_001.srt"
 }
 ```
+
+统一任务状态：
+
+```text
+pending
+planning
+matching
+tts_generating
+subtitle_generating
+rendering
+completed
+failed
+```
+
+索引任务和视频生成任务都通过这个接口查询状态。前端根据 `type` 区分 index / render，根据 `status` 判断是否继续轮询。
 
 ---
 
@@ -620,10 +704,17 @@ GET /api/tasks/{task_id}
 ```sql
 CREATE TABLE materials (
   id TEXT PRIMARY KEY,
-  filename TEXT NOT NULL,
+  original_filename TEXT NOT NULL,
+  stored_filename TEXT NOT NULL,
   path TEXT NOT NULL,
   duration REAL,
+  width INTEGER,
+  height INTEGER,
+  fps REAL,
   status TEXT DEFAULT 'uploaded',
+  embedding_backend TEXT,
+  embedding_model TEXT,
+  index_error TEXT,
   created_at TEXT NOT NULL
 );
 ```
@@ -633,29 +724,37 @@ CREATE TABLE materials (
 | 字段 | 说明 |
 |---|---|
 | id | 素材 ID |
-| filename | 文件名 |
+| original_filename | 用户上传时的原始文件名 |
+| stored_filename | 后端保存的唯一文件名 |
 | path | 本地路径 |
 | duration | 视频时长 |
+| width | 视频宽度 |
+| height | 视频高度 |
+| fps | 视频帧率 |
 | status | uploaded / indexing / indexed / failed |
+| embedding_backend | 索引使用的后端，默认 gemini |
+| embedding_model | 索引使用的模型，默认 gemini-embedding-2-preview |
+| index_error | 索引失败时的错误信息 |
 | created_at | 创建时间 |
 
 ---
 
-### 8.2 render_tasks 表
+### 8.2 tasks 表
+
+索引任务和视频生成任务统一使用 `tasks` 表。`type` 用于区分任务类型，`status` 用于前端判断是否继续轮询。
 
 ```sql
-CREATE TABLE render_tasks (
+CREATE TABLE tasks (
   id TEXT PRIMARY KEY,
-  script TEXT NOT NULL,
-  voice TEXT,
-  aspect_ratio TEXT,
   status TEXT DEFAULT 'pending',
+  type TEXT NOT NULL,
   progress INTEGER DEFAULT 0,
   current_step TEXT,
-  output_path TEXT,
-  subtitle_path TEXT,
   error_message TEXT,
-  created_at TEXT NOT NULL
+  result_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
 );
 ```
 
@@ -664,16 +763,15 @@ CREATE TABLE render_tasks (
 | 字段 | 说明 |
 |---|---|
 | id | 任务 ID |
-| script | 原始口播文案 |
-| voice | 配音音色 |
-| aspect_ratio | 视频比例 |
-| status | pending / running / completed / failed |
+| type | index / render |
+| status | pending / planning / matching / tts_generating / subtitle_generating / rendering / completed / failed |
 | progress | 进度百分比 |
 | current_step | 当前步骤 |
-| output_path | 输出视频路径 |
-| subtitle_path | 字幕路径 |
 | error_message | 错误信息 |
+| result_json | 任务结果 JSON，例如 output_url、subtitle_url、indexed_count |
 | created_at | 创建时间 |
+| updated_at | 更新时间 |
+| completed_at | 完成时间 |
 
 ---
 
@@ -686,8 +784,17 @@ CREATE TABLE render_segments (
   segment_index INTEGER NOT NULL,
   narration TEXT NOT NULL,
   visual_query TEXT NOT NULL,
+  estimated_duration REAL,
+  actual_duration REAL,
+  source_file TEXT,
+  source_start_time REAL,
+  source_end_time REAL,
+  similarity_score REAL,
   matched_clip TEXT,
-  duration REAL,
+  clip_path TEXT,
+  voice_path TEXT,
+  subtitle_start REAL,
+  subtitle_end REAL,
   created_at TEXT NOT NULL
 );
 ```
@@ -701,8 +808,17 @@ CREATE TABLE render_segments (
 | segment_index | 分镜顺序 |
 | narration | 口播文本 |
 | visual_query | 检索画面的描述 |
-| matched_clip | 匹配到的视频片段 |
-| duration | 预计时长 |
+| estimated_duration | LLM 估算时长 |
+| actual_duration | TTS 音频实际时长 |
+| source_file | 匹配到的原始素材路径 |
+| source_start_time | 素材片段开始时间 |
+| source_end_time | 素材片段结束时间 |
+| similarity_score | SentrySearch 相似度分数 |
+| matched_clip | 匹配后裁剪片段路径 |
+| clip_path | 统一转码后的片段路径 |
+| voice_path | 当前分镜的 TTS 音频路径 |
+| subtitle_start | 当前分镜字幕开始时间 |
+| subtitle_end | 当前分镜字幕结束时间 |
 | created_at | 创建时间 |
 
 ---
@@ -712,45 +828,61 @@ CREATE TABLE render_segments (
 ### 9.1 一键生成视频流程
 
 ```text
-1. 创建 render_task
-2. 更新任务进度：10%，正在生成分镜
-3. 调用 LLM 生成分镜 segments
-4. 更新任务进度：30%，正在匹配素材
-5. 调用 SentrySearch 匹配每个分镜的视频片段
-6. 更新任务进度：50%，正在生成口播
-7. 调用 edge-tts 生成 voice.mp3
-8. 更新任务进度：65%，正在生成字幕
-9. 根据 segments 生成 subtitle.srt
-10. 更新任务进度：80%，正在合成视频
-11. 调用 FFmpeg 裁剪、拼接、加字幕、加音频
-12. 更新任务进度：100%，生成完成
+1. 创建 type=render 的任务记录，状态 pending
+2. 如果请求未传 segments，更新状态 planning，调用 LLM 生成分镜 segments
+3. 对 LLM 输出做 JSON 解析和 Pydantic 校验，失败时重试 1 次
+4. 更新状态 matching，调用 SentrySearch 匹配每个分镜的视频片段
+5. 保存 source_file、source_start_time、source_end_time、similarity_score
+6. 更新状态 tts_generating，为每个 segment 单独生成一段 TTS 音频
+7. 读取每段 TTS 音频真实时长 actual_duration
+8. 更新状态 subtitle_generating，根据累计 actual_duration 生成 subtitle_start / subtitle_end 和 subtitle.srt
+9. 更新状态 rendering，按每段 actual_duration 裁剪素材并统一转码
+10. 拼接统一转码后的片段，混入口播音频，烧录字幕
+11. 更新状态 completed，写入 output_url、subtitle_url
+12. 任意步骤失败时更新状态 failed，保存 error_message
 ```
 
 ### 9.2 后端伪代码
 
 ```python
 def run_render_pipeline(task_id, req):
-    update_task(task_id, 10, "正在生成分镜")
-    segments = plan_script(req.script)
+    try:
+        if req.segments:
+            segments = req.segments
+        else:
+            update_task(task_id, "planning", 10, "正在生成分镜")
+            segments = plan_script_with_validation(req.script)
 
-    update_task(task_id, 30, "正在匹配素材")
-    segments = match_clips(segments)
+        update_task(task_id, "matching", 30, "正在匹配素材")
+        segments = match_clips_with_sentrysearch(segments)
 
-    update_task(task_id, 50, "正在生成口播")
-    voice_path = generate_tts(req.script, req.voice)
+        update_task(task_id, "tts_generating", 50, "正在生成口播")
+        segments = generate_segment_tts(segments, req.voice)
+        # generate_segment_tts 写入 voice_path 和 actual_duration
 
-    update_task(task_id, 65, "正在生成字幕")
-    subtitle_path = generate_subtitle(segments)
+        update_task(task_id, "subtitle_generating", 65, "正在生成字幕")
+        subtitle_path = generate_subtitle_by_actual_duration(segments)
+        # subtitle_start / subtitle_end 由累计 actual_duration 计算
 
-    update_task(task_id, 80, "正在合成视频")
-    output_path = render_final_video(
-        segments=segments,
-        voice_path=voice_path,
-        subtitle_path=subtitle_path,
-        aspect_ratio=req.aspect_ratio
-    )
+        update_task(task_id, "rendering", 80, "正在合成视频")
+        output_path = render_final_video(
+            segments=segments,
+            subtitle_path=subtitle_path,
+            aspect_ratio=req.aspect_ratio,
+        )
 
-    update_task(task_id, 100, "生成完成", output_path=output_path)
+        update_task(
+            task_id,
+            "completed",
+            100,
+            "生成完成",
+            result_json={
+                "output_url": to_static_url(output_path),
+                "subtitle_url": to_static_url(subtitle_path),
+            },
+        )
+    except Exception as exc:
+        update_task(task_id, "failed", 100, "生成失败", error_message=str(exc))
 ```
 
 ---
@@ -763,10 +895,10 @@ def run_render_pipeline(task_id, req):
 请把用户输入的口播文案拆成适合短视频混剪的分镜脚本。
 
 要求：
-1. 每个分镜包含 narration、visual_query、duration。
+1. 每个分镜包含 narration、visual_query、estimated_duration。
 2. narration 是这一段要朗读的口播文本。
 3. visual_query 是用于从视频素材库检索画面的描述，要具体、可视化。
-4. duration 根据 narration 字数估算，中文每秒约 4～5 个字。
+4. estimated_duration 根据 narration 字数估算，中文每秒约 4～5 个字。
 5. visual_query 要适合检索视频画面，不要太抽象。
 6. 输出 JSON 数组，不要输出解释。
 
@@ -778,32 +910,80 @@ def run_render_pipeline(task_id, req):
   {
     "narration": "现在很多企业都在做 AI Agent",
     "visual_query": "科技感办公室，AI大屏，团队讨论，企业数字化",
-    "duration": 3.5
+    "estimated_duration": 3.5
   }
 ]
+```
+
+LLM 输出处理要求：
+
+```text
+1. 后端先解析 JSON，不接受 Markdown 代码块之外的解释性文本。
+2. 使用 Pydantic 校验 segments 数组。
+3. narration、visual_query 不能为空。
+4. estimated_duration 必须大于 0。
+5. JSON 解析失败或字段缺失时，使用同一 prompt 追加“只输出合法 JSON”重试 1 次。
+6. 仍失败则任务状态改为 failed，并保存原始错误信息。
 ```
 
 ---
 
 ## 11. FFmpeg 合成方案
 
-### 11.1 统一竖屏 9:16
+### 11.1 合成原则
+
+不同素材的编码、分辨率、帧率和音轨可能不一致，第一版不直接用 `-c copy` 拼接原始片段。所有 matched clip 必须先统一转码，再拼接。
+
+统一规则：
+
+```text
+1. 9:16 输出尺寸：1080x1920
+2. 16:9 输出尺寸：1920x1080
+3. 1:1 输出尺寸：1080x1080
+4. 输出 fps：30
+5. 像素格式：yuv420p
+6. 视频编码：优先 libx264，不可用时 fallback 到 mpeg4
+7. 去掉原素材音频：-an
+8. 最终视频只混入 edge-tts 生成的口播音频
+```
+
+### 11.2 统一竖屏 9:16
 
 ```bash
 ffmpeg -i input.mp4 \
--vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" \
--an output_vertical.mp4
+-ss 12.0 -t 3.8 \
+-vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p" \
+-an -c:v libx264 -preset veryfast -crf 20 output_vertical.mp4
 ```
 
-### 11.2 统一横屏 16:9
+### 11.3 统一横屏 16:9
 
 ```bash
 ffmpeg -i input.mp4 \
--vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
--an output_horizontal.mp4
+-ss 12.0 -t 3.8 \
+-vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
+-an -c:v libx264 -preset veryfast -crf 20 output_horizontal.mp4
 ```
 
-### 11.3 拼接片段
+### 11.4 统一方屏 1:1
+
+```bash
+ffmpeg -i input.mp4 \
+-ss 12.0 -t 3.8 \
+-vf "scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080,fps=30,format=yuv420p" \
+-an -c:v libx264 -preset veryfast -crf 20 output_square.mp4
+```
+
+如果当前 FFmpeg 不支持 `libx264`，使用 `mpeg4` fallback：
+
+```bash
+ffmpeg -i input.mp4 \
+-ss 12.0 -t 3.8 \
+-vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p" \
+-an -c:v mpeg4 -q:v 5 output_vertical.mp4
+```
+
+### 11.5 拼接统一转码后的片段
 
 生成 `concat.txt`：
 
@@ -816,22 +996,48 @@ file 'clip_003_vertical.mp4'
 执行：
 
 ```bash
-ffmpeg -f concat -safe 0 -i concat.txt -c copy output/bg.mp4
+ffmpeg -f concat -safe 0 -i concat.txt \
+-c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p output/bg.mp4
 ```
 
-### 11.4 混入口播音频
+### 11.6 混入口播音频
+
+每个 segment 单独生成 TTS 音频后，先按顺序拼接口播音频，再与背景视频合成。
+
+生成 `voice_concat.txt`：
+
+```text
+file 'voice_001.mp3'
+file 'voice_002.mp3'
+file 'voice_003.mp3'
+```
+
+拼接口播：
+
+```bash
+ffmpeg -f concat -safe 0 -i voice_concat.txt -c:a libmp3lame output/voice.mp3
+```
 
 ```bash
 ffmpeg -i output/bg.mp4 -i output/voice.mp3 \
 -c:v copy -c:a aac -shortest output/with_voice.mp4
 ```
 
-### 11.5 烧录字幕
+### 11.7 烧录字幕
 
 ```bash
 ffmpeg -i output/with_voice.mp4 \
 -vf "subtitles=output/subtitle.srt" \
--c:a copy output/final.mp4
+-c:v libx264 -preset veryfast -crf 20 -c:a copy output/final.mp4
+```
+
+字幕时间线根据每个 segment 的 `actual_duration` 计算：
+
+```text
+segment_001 subtitle_start = 0
+segment_001 subtitle_end = segment_001.actual_duration
+segment_002 subtitle_start = segment_001.subtitle_end
+segment_002 subtitle_end = segment_002.subtitle_start + segment_002.actual_duration
 ```
 
 ---
@@ -856,22 +1062,39 @@ export function planScript(data: {
 }
 
 export function matchClips(data: {
-  segments: any[];
+  segments: Segment[];
 }) {
   return api.post("/videos/match-clips", data);
 }
 
 export function renderVideo(data: {
   script: string;
-  segments: any[];
   voice: string;
   aspect_ratio: string;
+  segments?: Segment[];
 }) {
   return api.post("/videos/render", data);
 }
 
 export function getTask(taskId: string) {
   return api.get(`/tasks/${taskId}`);
+}
+
+export interface Segment {
+  index: number;
+  narration: string;
+  visual_query: string;
+  estimated_duration?: number;
+  actual_duration?: number;
+  source_file?: string;
+  source_start_time?: number;
+  source_end_time?: number;
+  similarity_score?: number;
+  matched_clip?: string;
+  clip_path?: string;
+  voice_path?: string;
+  subtitle_start?: number;
+  subtitle_end?: number;
 }
 ```
 
@@ -988,116 +1211,130 @@ function pollTask(taskId: string) {
 
 ## 14. 开发计划
 
-### 阶段 1：跑通后端生成链路
+第一版不收缩 MVP 功能，但开发顺序调整为先建立稳定素材和任务基础，再跑通一键生成，最后补齐前端和手动调整能力。
+
+### 阶段 1：后端素材上传、索引、素材列表、任务查询
 
 目标：
 
 ```text
-用一个接口 /api/videos/render 跑通完整生成流程。
+先让素材库和索引任务稳定可用，为后续 render 提供可检索素材。
 ```
 
 任务：
 
 ```text
 1. 初始化 FastAPI 项目
-2. 配置静态文件目录
-3. 实现 render_tasks 表
-4. 实现任务创建和状态更新
-5. 接入 LLM 分镜
-6. 接入 SentrySearch 检索素材
-7. 接入 edge-tts 生成口播
-8. 接入 FFmpeg 合成视频
+2. 配置静态文件目录和本地存储目录
+3. 实现 materials 表、tasks 表
+4. 实现 /api/materials/upload
+5. 实现 /api/materials
+6. 实现 /api/materials/index
+7. 实现 /api/tasks/{task_id}
+8. 通过 Python import 集成 SentrySearch
+9. 固定 ChromaDB 路径为 ai-video-mixer-api/data/chroma/
+10. 保存 embedding_backend 和 embedding_model
 ```
 
 验收标准：
 
 ```text
-输入一段文案，接口返回 task_id，最终 output/videos 生成 final.mp4。
+前端或接口工具可以上传 mp4 / mov，后端保存唯一文件名，读取视频元信息，触发索引任务，并通过 /api/tasks/{task_id} 看到索引完成。
 ```
 
 ---
 
-### 阶段 2：跑通前端创建页面
+### 阶段 2：后端一键 render 完整链路
 
 目标：
 
 ```text
-前端可以输入文案并生成视频。
+用 /api/videos/render 跑通 plan → match → tts → subtitle → render 完整链路。
 ```
 
 任务：
 
 ```text
-1. 初始化 Vue3 + Vite 项目
-2. 安装 Element Plus
-3. 创建 CreateVideo.vue
-4. 封装 renderVideo 和 getTask API
-5. 实现任务进度轮询
-6. 实现视频预览
+1. 实现 /api/videos/render
+2. 实现 /api/scripts/plan
+3. 实现 LLM JSON 输出解析、Pydantic 校验和失败重试
+4. 实现 /api/videos/match-clips
+5. 接入 SentrySearch 检索素材
+6. 实现每个 segment 单独生成 edge-tts 音频
+7. 读取每段 TTS 实际时长 actual_duration
+8. 按 actual_duration 生成字幕时间线和 SRT
+9. 按 actual_duration 裁剪、统一转码、拼接视频片段
+10. 混入口播音频并烧录字幕
+11. 将 output_url、subtitle_url 写入 tasks.result_json
 ```
 
 验收标准：
 
 ```text
-前端点击“一键生成视频”，能看到进度，完成后能播放视频。
+输入一段文案，接口返回 task_id；任务完成后 output/videos 生成 final.mp4，output/subtitles 生成 final.srt，音频、字幕和画面时间基本同步。
 ```
 
 ---
 
-### 阶段 3：增加素材库页面
+### 阶段 3：前端素材库、创建页面、任务轮询、视频预览
 
 目标：
 
 ```text
-支持前端上传素材和触发索引。
+前端可以完成素材上传、索引、输入文案、一键生成视频、查看进度和预览下载。
 ```
 
 任务：
 
 ```text
-1. 实现 /api/materials/upload
-2. 实现 /api/materials
-3. 实现 /api/materials/index
-4. 前端实现 MaterialLibrary.vue
-5. 支持素材列表展示
-6. 支持上传和建索引按钮
+1. 初始化 Vue3 + Vite + TypeScript 项目
+2. 安装 Element Plus、Axios、Vue Router、Pinia
+3. 实现 MaterialLibrary.vue
+4. 实现 CreateVideo.vue
+5. 实现 TaskDetail.vue
+6. 实现 VideoPreview.vue
+7. 封装 material.ts、video.ts、task.ts
+8. 实现任务进度轮询
+9. 实现视频预览和下载
 ```
 
 验收标准：
 
 ```text
-前端可以上传视频，后端保存到 materials 目录，并能触发索引。
+用户可以在前端上传素材并建立索引，输入口播文案后点击“一键生成视频”，能看到进度，完成后能播放和下载 MP4 / SRT。
 ```
 
 ---
 
-### 阶段 4：增加分镜预览与手动调整
+### 阶段 4：分镜预览、重新匹配、手动替换片段
 
 目标：
 
 ```text
-用户可以看到 AI 生成的分镜，并查看匹配到的素材片段。
+用户可以在生成最终视频前查看 AI 分镜和素材匹配结果，并进行基础人工干预。
 ```
 
 任务：
 
 ```text
-1. 实现 /api/scripts/plan
-2. 实现 /api/videos/match-clips
-3. 前端展示分镜列表
-4. 展示 matched_clip
-5. 支持重新匹配单个分镜
+1. 前端展示分镜列表
+2. 展示 narration、visual_query、estimated_duration
+3. 展示 source_file、source_start_time、source_end_time、similarity_score
+4. 支持重新匹配单个分镜
+5. 支持每个分镜返回 top3 候选
+6. 支持用户替换 matched_clip
+7. 支持带 segments 调用 /api/videos/render 重新生成
 ```
 
 验收标准：
 
 ```text
-用户生成视频前，可以看到每句口播对应的视频画面。
+用户生成视频前，可以看到每句口播对应的视频画面，可以重新匹配或替换素材片段，再生成最终视频。
 ```
 
 ---
 
-### 阶段 5：优化生成效果
+### 阶段 5：字幕样式、BGM、top3 候选、效果优化
 
 目标：
 
@@ -1108,18 +1345,18 @@ function pollTask(taskId: string) {
 任务：
 
 ```text
-1. 优化字幕样式
+1. 优化字幕字体、字号、描边、位置
 2. 增加背景音乐
 3. 增加片段去重
-4. 支持 9:16 / 16:9 / 1:1
-5. 支持 top3 素材候选
-6. 支持用户替换素材片段
+4. 支持 9:16 / 16:9 / 1:1 的稳定合成预设
+5. 优化 top3 素材候选展示
+6. 优化片段裁剪和画面节奏
 ```
 
 验收标准：
 
 ```text
-生成的视频画面不重复，字幕清晰，口播和画面节奏基本匹配。
+生成的视频画面不重复，字幕清晰，口播和画面节奏基本匹配，整体达到可预览和二次调整的短视频效果。
 ```
 
 ---

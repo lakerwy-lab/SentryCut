@@ -31,10 +31,17 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
 
 # Runtime data
 data/
 uploads/
+ai-video-mixer-api/materials/
+ai-video-mixer-api/clips/
+ai-video-mixer-api/output/
+ai-video-mixer-api/data/
 
 # Local database
 *.sqlite
