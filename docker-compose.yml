@@ -4,6 +4,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.11-slim}
     image: sentrycut-api:latest
     container_name: sentrycut-api
     restart: unless-stopped
@@ -46,6 +48,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:20-alpine}
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.27-alpine}
     image: sentrycut-web:latest
     container_name: sentrycut-web
     restart: unless-stopped

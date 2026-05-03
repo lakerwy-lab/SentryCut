@@ -1,4 +1,8 @@
-FROM node:20-alpine AS build
+# Override these images when the deploy server cannot reach Docker Hub.
+ARG NODE_IMAGE=node:20-alpine
+ARG NGINX_IMAGE=nginx:1.27-alpine
+
+FROM ${NODE_IMAGE} AS build
 
 WORKDIR /app
 
@@ -9,7 +13,7 @@ RUN npm ci
 COPY ai-video-mixer-web ./
 RUN npm run build
 
-FROM nginx:1.27-alpine
+FROM ${NGINX_IMAGE}
 
 # Nginx 同时承载 SPA 静态文件和后端反向代理。
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf

@@ -1,4 +1,6 @@
-FROM python:3.11-slim
+# Override PYTHON_IMAGE when the deploy server cannot reach Docker Hub.
+ARG PYTHON_IMAGE=python:3.11-slim
+FROM ${PYTHON_IMAGE}
 
 # 后端容器需要 ffmpeg 处理素材切片、音频合成和最终渲染。
 ENV PYTHONDONTWRITEBYTECODE=1 \
