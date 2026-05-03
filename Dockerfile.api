@@ -16,14 +16,17 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY sentrysearch ./sentrysearch
-COPY ai-video-mixer-api ./ai-video-mixer-api
+COPY ai-video-mixer-api/requirements.txt ./ai-video-mixer-api/requirements.txt
 
 # 使用仓库内的 sentrysearch 本地包，避免运行时依赖 GitHub 网络拉取。
 RUN python -m pip install --upgrade pip \
     && python -m pip install -e ./sentrysearch \
     && sed '/^sentrysearch @/d' ./ai-video-mixer-api/requirements.txt > /tmp/api-requirements.txt \
-    && python -m pip install -r /tmp/api-requirements.txt \
-    && python -m compileall ./ai-video-mixer-api/app ./sentrysearch/sentrysearch
+    && python -m pip install -r /tmp/api-requirements.txt
+
+COPY ai-video-mixer-api ./ai-video-mixer-api
+
+RUN python -m compileall ./ai-video-mixer-api/app ./sentrysearch/sentrysearch
 
 WORKDIR /app/ai-video-mixer-api
 

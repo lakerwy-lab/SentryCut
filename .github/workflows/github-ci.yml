@@ -5,6 +5,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: sentrycut-production
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: [self-hosted, Linux, X64]
@@ -87,12 +91,21 @@ jobs:
 
           chmod 600 .env
 
-      - name: Build and deploy Docker services
+      - name: Build Docker images
+        env:
+          DOCKER_BUILDKIT: "1"
+          COMPOSE_DOCKER_CLI_BUILD: "1"
+          BUILDKIT_PROGRESS: plain
         run: |
           cd "${DEPLOY_DIR}"
           # 先校验 compose 配置，再构建并滚动替换容器。
           docker compose config --quiet
-          docker compose up -d --build --remove-orphans
+          docker compose build --progress=plain
+
+      - name: Deploy Docker services
+        run: |
+          cd "${DEPLOY_DIR}"
+          docker compose up -d --remove-orphans
           docker compose ps
 
       - name: Cleanup old Docker images
