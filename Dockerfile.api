@@ -5,11 +5,27 @@ FROM ${PYTHON_IMAGE}
 # 后端容器需要 ffmpeg 处理素材切片、音频合成和最终渲染。
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
 
 WORKDIR /app
 
-RUN apt-get update \
+RUN set -eux; \
+    for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+        [ -f "${source_file}" ] || continue; \
+        sed -i \
+            -e 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+            -e 's|https://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+            -e 's|http://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+            -e 's|https://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+            -e 's|http://archive.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+            -e 's|https://archive.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+            -e 's|http://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+            -e 's|https://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+            "${source_file}"; \
+    done; \
+    apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ffmpeg \
