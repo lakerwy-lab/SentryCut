@@ -6,24 +6,87 @@ on:
       - main
 
 jobs:
-  sync-code:
+  deploy:
     runs-on: [self-hosted, Linux, X64]
+
+    env:
+      # self-hosted runner 上的应用部署目录。
+      DEPLOY_DIR: /home/bl/SentryCut
+      # 敏感配置走 GitHub Secrets；非敏感默认值可用 GitHub Variables 覆盖。
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_TEXT_MODEL: ${{ vars.GEMINI_TEXT_MODEL }}
+      EMBEDDING_BACKEND: ${{ vars.EMBEDDING_BACKEND }}
+      EMBEDDING_MODEL: ${{ vars.EMBEDDING_MODEL }}
+      DEFAULT_TTS_VOICE: ${{ vars.DEFAULT_TTS_VOICE }}
+      CORS_ALLOW_ORIGINS: ${{ vars.CORS_ALLOW_ORIGINS }}
+      API_PORT: ${{ vars.API_PORT }}
+      WEB_PORT: ${{ vars.WEB_PORT }}
 
     steps:
       - name: Checkout latest code
         uses: actions/checkout@v4
 
+      - name: Validate Docker Compose is available
+        run: |
+          docker --version
+          docker compose version
+
       - name: Sync code to server directory
         run: |
-          echo "Start syncing code to /home/bl/SentryCut"
+          echo "Start syncing code to ${DEPLOY_DIR}"
 
+          mkdir -p "${DEPLOY_DIR}"
+
+          # 只同步源码和部署配置，保留服务器本地运行数据，避免发版删除素材/数据库/输出视频。
           rsync -av --delete \
             --exclude ".git" \
             --exclude ".env" \
-            --exclude "logs" \
-            --exclude "data" \
-            --exclude "uploads" \
-            ./ /home/bl/SentryCut/
+            --exclude ".env.*" \
+            --exclude "logs/" \
+            --exclude "ai-video-mixer-api/materials/" \
+            --exclude "ai-video-mixer-api/clips/" \
+            --exclude "ai-video-mixer-api/output/" \
+            --exclude "ai-video-mixer-api/data/" \
+            --exclude "ai-video-mixer-web/node_modules/" \
+            --exclude "ai-video-mixer-web/dist/" \
+            ./ "${DEPLOY_DIR}/"
 
           echo "Code synced successfully"
-          ls -la /home/bl/SentryCut
+          ls -la "${DEPLOY_DIR}"
+
+      - name: Write deployment environment
+        run: |
+          set +x
+          cd "${DEPLOY_DIR}"
+
+          # 如果没有配置新的 GEMINI_API_KEY，则沿用服务器上已有的 .env，避免把密钥清空。
+          if [ -z "${GEMINI_API_KEY}" ] && [ -f .env ]; then
+            echo "GEMINI_API_KEY secret is empty; preserving existing ${DEPLOY_DIR}/.env"
+            exit 0
+          fi
+
+          # 生成 Docker Compose 使用的环境文件；set +x 防止密钥打印到 Actions 日志。
+          {
+            printf 'GEMINI_API_KEY=%s\n' "${GEMINI_API_KEY}"
+            printf 'GEMINI_TEXT_MODEL=%s\n' "${GEMINI_TEXT_MODEL:-gemini-2.5-flash}"
+            printf 'EMBEDDING_BACKEND=%s\n' "${EMBEDDING_BACKEND:-gemini}"
+            printf 'EMBEDDING_MODEL=%s\n' "${EMBEDDING_MODEL:-gemini-embedding-2-preview}"
+            printf 'DEFAULT_TTS_VOICE=%s\n' "${DEFAULT_TTS_VOICE:-zh-CN-XiaoxiaoNeural}"
+            printf 'CORS_ALLOW_ORIGINS=%s\n' "${CORS_ALLOW_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}"
+            printf 'API_PORT=%s\n' "${API_PORT:-8000}"
+            printf 'WEB_PORT=%s\n' "${WEB_PORT:-5173}"
+          } > .env
+
+          chmod 600 .env
+
+      - name: Build and deploy Docker services
+        run: |
+          cd "${DEPLOY_DIR}"
+          # 先校验 compose 配置，再构建并滚动替换容器。
+          docker compose config --quiet
+          docker compose up -d --build --remove-orphans
+          docker compose ps
+
+      - name: Cleanup old Docker images
+        if: always()
+        run: docker image prune -f

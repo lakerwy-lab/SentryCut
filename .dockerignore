@@ -1,0 +1,19 @@
+.git
+.github
+
+# 本地密钥、虚拟环境、构建产物和运行数据不进入 Docker build context。
+**/.env
+**/.env.*
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/node_modules
+**/dist
+**/logs
+**/*.pyc
+**/*.tsbuildinfo
+
+ai-video-mixer-api/materials
+ai-video-mixer-api/clips
+ai-video-mixer-api/output
+ai-video-mixer-api/data
